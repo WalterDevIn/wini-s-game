@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Wini's Overworld ASCII</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="game-shell">
+    <header class="topbar">
+      <div>
+        <h1>Wini's Overworld ASCII</h1>
+        <p>Minecraft 2D ASCII · solo Overworld</p>
+      </div>
+      <div id="status" class="status">Cargando mundo…</div>
+    </header>
+
+    <section class="game-panel">
+      <canvas id="game" width="1280" height="720" aria-label="Juego 2D ASCII"></canvas>
+      <div class="help">
+        <span><b>A/D</b> mover</span>
+        <span><b>W / Espacio</b> saltar</span>
+        <span><b>Click izq.</b> minar</span>
+        <span><b>Click der.</b> colocar</span>
+        <span><b>1–6</b> seleccionar bloque</span>
+        <span><b>R</b> mundo nuevo</span>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
