@@ -29,15 +29,8 @@ body {
   margin-bottom: 12px;
 }
 
-h1 {
-  margin: 0;
-  font-size: clamp(1.3rem, 2vw, 2rem);
-}
-
-p {
-  margin: 4px 0 0;
-  color: #9eb3a1;
-}
+h1 { margin: 0; font-size: clamp(1.3rem, 2vw, 2rem); }
+p { margin: 4px 0 0; color: #9eb3a1; }
 
 .status {
   color: #c8d8c9;
@@ -59,6 +52,7 @@ canvas {
   height: auto;
   image-rendering: pixelated;
   cursor: crosshair;
+  touch-action: none;
 }
 
 .help {
