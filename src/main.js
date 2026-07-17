@@ -2,369 +2,409 @@ const canvas = document.querySelector('#game');
 const ctx = canvas.getContext('2d');
 const statusEl = document.querySelector('#status');
 
-const TILE = 24;
-const WORLD_W = 360;
-const WORLD_H = 120;
-const GRAVITY = 32;
-const REACH = 5.5;
-const FONT = '700 20px "Cascadia Mono", Consolas, monospace';
+const WORLD_SIZE = 72;
+const TILE_W = 54;
+const TILE_H = 27;
+const HEIGHT_STEP = 15;
+const VIEW_RADIUS = 15;
+const REACH = 4.5;
+const MOVE_REPEAT_MS = 115;
 
 const BLOCKS = {
-  air:    { char: ' ', solid: false, color: '#000000', drop: null },
-  grass:  { char: '▓', solid: true,  color: '#65b85e', drop: 'dirt' },
-  dirt:   { char: '▒', solid: true,  color: '#9a6a43', drop: 'dirt' },
-  stone:  { char: '█', solid: true,  color: '#87908b', drop: 'stone' },
-  coal:   { char: '◆', solid: true,  color: '#303735', drop: 'coal' },
-  iron:   { char: '¤', solid: true,  color: '#c78f69', drop: 'iron' },
-  wood:   { char: '║', solid: true,  color: '#a36d38', drop: 'wood' },
-  leaves: { char: '♣', solid: true,  color: '#3f934b', drop: 'leaves' },
-  sand:   { char: '░', solid: true,  color: '#d8c27c', drop: 'sand' },
-  water:  { char: '≈', solid: false, color: '#4c8fc7', drop: null },
-  bedrock:{ char: '▓', solid: true,  color: '#3e4442', drop: null }
+  grass:  { char: '▓', top: '#65b85e', left: '#3f7e45', right: '#4e9852', solid: true },
+  dirt:   { char: '▒', top: '#9a6a43', left: '#70472d', right: '#825637', solid: true },
+  stone:  { char: '█', top: '#8a918d', left: '#606763', right: '#747b77', solid: true },
+  sand:   { char: '░', top: '#d8c27c', left: '#a99457', right: '#baa762', solid: true },
+  water:  { char: '≈', top: '#4c8fc7', left: '#2e668f', right: '#397aa7', solid: false },
+  wood:   { char: '║', top: '#a36d38', left: '#704921', right: '#87592b', solid: true },
+  leaves: { char: '♣', top: '#3f934b', left: '#286631', right: '#347b3e', solid: true },
+  coal:   { char: '◆', top: '#343a37', left: '#202522', right: '#2a302d', solid: true }
 };
 
-const HOTBAR = ['dirt', 'stone', 'wood', 'leaves', 'sand', 'coal'];
+const HOTBAR = ['grass', 'dirt', 'stone', 'sand', 'wood', 'leaves'];
 const keys = new Set();
-let world = [];
-let surface = [];
-let selected = 0;
 let seed = Math.floor(Math.random() * 1_000_000);
-let camera = { x: 0, y: 0 };
-let mouse = { x: 0, y: 0, tileX: 0, tileY: 0 };
-let lastTime = performance.now();
+let world = [];
+let selected = 0;
+let hovered = null;
+let lastMoveAt = 0;
 
-const player = {
-  x: 12,
-  y: 20,
-  w: 0.72,
-  h: 1.8,
-  vx: 0,
-  vy: 0,
-  grounded: false,
-  facing: 1,
-  inventory: { dirt: 24, stone: 8, wood: 10, leaves: 4, sand: 6, coal: 0, iron: 0 }
+const inventory = {
+  grass: 20,
+  dirt: 40,
+  stone: 32,
+  sand: 18,
+  wood: 16,
+  leaves: 20
 };
 
-function hash(x, y = 0, s = seed) {
-  let n = x * 374761393 + y * 668265263 + s * 69069;
-  n = (n ^ (n >> 13)) * 1274126177;
-  return ((n ^ (n >> 16)) >>> 0) / 4294967295;
+const player = { x: 36, y: 36, z: 0 };
+
+function mulberry32(value) {
+  return function random() {
+    value |= 0;
+    value = value + 0x6D2B79F5 | 0;
+    let t = Math.imul(value ^ value >>> 15, 1 | value);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
 }
 
-function smoothNoise(x, scale, offset = 0) {
-  const p = x / scale;
-  const i = Math.floor(p);
-  const t = p - i;
-  const a = hash(i, offset);
-  const b = hash(i + 1, offset);
-  const ease = t * t * (3 - 2 * t);
-  return a + (b - a) * ease;
+function hashNoise(x, y, salt = 0) {
+  const n = Math.sin(x * 127.1 + y * 311.7 + seed * 0.017 + salt * 91.3) * 43758.5453;
+  return n - Math.floor(n);
 }
 
-function makeWorld() {
-  world = Array.from({ length: WORLD_H }, () => Array(WORLD_W).fill('air'));
-  surface = Array(WORLD_W).fill(0);
+function smoothNoise(x, y, scale, salt = 0) {
+  const sx = x / scale;
+  const sy = y / scale;
+  const x0 = Math.floor(sx);
+  const y0 = Math.floor(sy);
+  const tx = sx - x0;
+  const ty = sy - y0;
+  const fade = t => t * t * (3 - 2 * t);
+  const a = hashNoise(x0, y0, salt);
+  const b = hashNoise(x0 + 1, y0, salt);
+  const c = hashNoise(x0, y0 + 1, salt);
+  const d = hashNoise(x0 + 1, y0 + 1, salt);
+  const ix0 = a + (b - a) * fade(tx);
+  const ix1 = c + (d - c) * fade(tx);
+  return ix0 + (ix1 - ix0) * fade(ty);
+}
 
-  for (let x = 0; x < WORLD_W; x++) {
-    const continental = smoothNoise(x, 52, 11) * 11;
-    const hills = smoothNoise(x, 17, 23) * 8;
-    const detail = smoothNoise(x, 6, 47) * 3;
-    const ground = Math.floor(31 + continental + hills + detail);
-    surface[x] = ground;
+function surfaceType(height, moisture) {
+  if (height <= 1) return 'water';
+  if (height === 2 && moisture < 0.52) return 'sand';
+  if (height >= 7) return 'stone';
+  return 'grass';
+}
 
-    const desert = smoothNoise(x, 60, 101) > 0.72;
-    for (let y = ground; y < WORLD_H; y++) {
-      let type = y === WORLD_H - 1 ? 'bedrock' : y === ground ? (desert ? 'sand' : 'grass') : y < ground + 4 ? (desert ? 'sand' : 'dirt') : 'stone';
-      if (type === 'stone') {
-        const cave = hash(x, y, seed + 400) > 0.81 && smoothNoise(x + y * 0.35, 9, 71) > 0.48;
-        if (cave && y > ground + 5 && y < WORLD_H - 2) type = 'air';
-        else if (hash(x, y, seed + 900) > 0.965) type = 'iron';
-        else if (hash(x, y, seed + 700) > 0.925) type = 'coal';
+function generateWorld() {
+  const random = mulberry32(seed);
+  world = Array.from({ length: WORLD_SIZE }, (_, y) =>
+    Array.from({ length: WORLD_SIZE }, (_, x) => {
+      const broad = smoothNoise(x, y, 18, 1);
+      const detail = smoothNoise(x, y, 7, 2);
+      const ridge = Math.abs(smoothNoise(x, y, 11, 3) - 0.5) * 2;
+      const height = Math.max(0, Math.min(9, Math.floor(1 + broad * 5 + detail * 3 - ridge * 1.5)));
+      const moisture = smoothNoise(x, y, 13, 4);
+      const top = surfaceType(height, moisture);
+      const treeChance = top === 'grass' && height >= 3 && height <= 6 && random() < 0.045;
+      return {
+        height,
+        top,
+        tree: treeChance,
+        ore: top === 'stone' && random() < 0.15 ? 'coal' : null
+      };
+    })
+  );
+
+  player.x = Math.floor(WORLD_SIZE / 2);
+  player.y = Math.floor(WORLD_SIZE / 2);
+  findSafeSpawn();
+  hovered = null;
+}
+
+function findSafeSpawn() {
+  for (let radius = 0; radius < 16; radius += 1) {
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dx = -radius; dx <= radius; dx += 1) {
+        const x = Math.floor(WORLD_SIZE / 2) + dx;
+        const y = Math.floor(WORLD_SIZE / 2) + dy;
+        const tile = getTile(x, y);
+        if (tile && tile.top !== 'water' && !tile.tree) {
+          player.x = x;
+          player.y = y;
+          player.z = tile.height;
+          return;
+        }
       }
-      world[y][x] = type;
-    }
-  }
-
-  addWater();
-  addTrees();
-  spawnPlayer();
-}
-
-function addWater() {
-  const seaLevel = 39;
-  for (let x = 1; x < WORLD_W - 1; x++) {
-    if (surface[x] > seaLevel) {
-      for (let y = seaLevel; y < surface[x]; y++) world[y][x] = 'water';
-      if (world[surface[x]][x] === 'grass') world[surface[x]][x] = 'sand';
     }
   }
 }
 
-function addTrees() {
-  for (let x = 5; x < WORLD_W - 5; x++) {
-    const y = surface[x];
-    if (world[y][x] !== 'grass' || hash(x, 0, seed + 1200) < 0.87) continue;
-    const height = 3 + Math.floor(hash(x, 1, seed + 1200) * 3);
-    for (let i = 1; i <= height; i++) world[y - i][x] = 'wood';
-    const crownY = y - height;
-    for (let oy = -2; oy <= 1; oy++) {
-      for (let ox = -2; ox <= 2; ox++) {
-        if (Math.abs(ox) + Math.abs(oy) > 3) continue;
-        const tx = x + ox;
-        const ty = crownY + oy;
-        if (world[ty]?.[tx] === 'air') world[ty][tx] = 'leaves';
-      }
-    }
-    x += 3;
-  }
-}
-
-function spawnPlayer() {
-  let x = 12;
-  while (x < WORLD_W - 12 && (world[surface[x]][x] === 'water' || world[surface[x] - 1][x] !== 'air')) x++;
-  player.x = x + 0.15;
-  player.y = surface[x] - player.h - 0.1;
-  player.vx = 0;
-  player.vy = 0;
-}
-
-function tileAt(x, y) {
-  if (x < 0 || x >= WORLD_W || y < 0 || y >= WORLD_H) return 'bedrock';
+function getTile(x, y) {
+  if (x < 0 || y < 0 || x >= WORLD_SIZE || y >= WORLD_SIZE) return null;
   return world[y][x];
 }
 
-function isSolid(x, y) {
-  return BLOCKS[tileAt(x, y)].solid;
+function worldToScreen(x, y, z = 0) {
+  const relX = x - player.x;
+  const relY = y - player.y;
+  return {
+    x: canvas.width / 2 + (relX - relY) * TILE_W / 2,
+    y: canvas.height / 2 + (relX + relY) * TILE_H / 2 - z * HEIGHT_STEP
+  };
 }
 
-function collides(x, y) {
-  const left = Math.floor(x + 0.05);
-  const right = Math.floor(x + player.w - 0.05);
-  const top = Math.floor(y + 0.05);
-  const bottom = Math.floor(y + player.h - 0.05);
-  return isSolid(left, top) || isSolid(right, top) || isSolid(left, bottom) || isSolid(right, bottom);
-}
-
-function update(dt) {
-  const move = (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0);
-  player.vx += move * 36 * dt;
-  player.vx *= Math.pow(player.grounded ? 0.0008 : 0.05, dt);
-  player.vx = Math.max(-7, Math.min(7, player.vx));
-  if (move) player.facing = move;
-
-  player.vy += GRAVITY * dt;
-  player.vy = Math.min(player.vy, 18);
-
-  moveAxis('x', player.vx * dt);
-  player.grounded = false;
-  moveAxis('y', player.vy * dt);
-
-  if (player.y > WORLD_H + 5) spawnPlayer();
-  updateCamera(dt);
-}
-
-function moveAxis(axis, amount) {
-  const steps = Math.max(1, Math.ceil(Math.abs(amount) / 0.08));
-  const delta = amount / steps;
-  for (let i = 0; i < steps; i++) {
-    const nx = axis === 'x' ? player.x + delta : player.x;
-    const ny = axis === 'y' ? player.y + delta : player.y;
-    if (!collides(nx, ny)) {
-      player[axis] += delta;
-    } else {
-      if (axis === 'y' && delta > 0) player.grounded = true;
-      player[axis === 'x' ? 'vx' : 'vy'] = 0;
-      break;
-    }
+function polygon(points, fill, stroke = null) {
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1;
+    ctx.stroke();
   }
 }
 
-function jump() {
-  if (player.grounded) {
-    player.vy = -11.5;
-    player.grounded = false;
+function drawBlock(x, y, tile) {
+  const p = worldToScreen(x, y, tile.height);
+  const def = BLOCKS[tile.ore || tile.top];
+  const halfW = TILE_W / 2;
+  const halfH = TILE_H / 2;
+  const depth = Math.max(8, tile.height * HEIGHT_STEP + 8);
+
+  const top = [
+    { x: p.x, y: p.y - halfH },
+    { x: p.x + halfW, y: p.y },
+    { x: p.x, y: p.y + halfH },
+    { x: p.x - halfW, y: p.y }
+  ];
+  const left = [top[3], top[2], { x: top[2].x, y: top[2].y + depth }, { x: top[3].x, y: top[3].y + depth }];
+  const right = [top[2], top[1], { x: top[1].x, y: top[1].y + depth }, { x: top[2].x, y: top[2].y + depth }];
+
+  if (tile.top !== 'water') {
+    polygon(left, def.left, '#17221b');
+    polygon(right, def.right, '#17221b');
   }
-}
+  polygon(top, def.top, '#1a281e');
 
-function updateCamera(dt) {
-  const visibleW = canvas.width / TILE;
-  const visibleH = canvas.height / TILE;
-  const targetX = player.x + player.w / 2 - visibleW / 2;
-  const targetY = player.y + player.h / 2 - visibleH / 2;
-  camera.x += (targetX - camera.x) * Math.min(1, dt * 7);
-  camera.y += (targetY - camera.y) * Math.min(1, dt * 7);
-  camera.x = Math.max(0, Math.min(WORLD_W - visibleW, camera.x));
-  camera.y = Math.max(0, Math.min(WORLD_H - visibleH, camera.y));
-}
-
-function inReach(tx, ty) {
-  const px = player.x + player.w / 2;
-  const py = player.y + player.h / 2;
-  return Math.hypot(tx + 0.5 - px, ty + 0.5 - py) <= REACH;
-}
-
-function mine(tx, ty) {
-  if (!inReach(tx, ty)) return;
-  const type = tileAt(tx, ty);
-  const block = BLOCKS[type];
-  if (type === 'air' || type === 'water' || type === 'bedrock') return;
-  world[ty][tx] = 'air';
-  if (block.drop) player.inventory[block.drop] = (player.inventory[block.drop] || 0) + 1;
-}
-
-function place(tx, ty) {
-  if (!inReach(tx, ty) || tileAt(tx, ty) !== 'air') return;
-  const type = HOTBAR[selected];
-  if ((player.inventory[type] || 0) <= 0) return;
-  world[ty][tx] = type;
-  if (collides(player.x, player.y)) {
-    world[ty][tx] = 'air';
-    return;
-  }
-  player.inventory[type]--;
-}
-
-function render() {
-  ctx.fillStyle = '#102331';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  drawSky();
-  ctx.font = FONT;
+  ctx.font = '700 18px "Cascadia Mono", Consolas, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.fillStyle = tile.top === 'water' ? '#d7f0ff' : '#f1f5ef';
+  ctx.globalAlpha = tile.top === 'water' ? 0.85 : 0.72;
+  ctx.fillText(def.char, p.x, p.y + 1);
+  ctx.globalAlpha = 1;
 
-  const startX = Math.max(0, Math.floor(camera.x) - 1);
-  const endX = Math.min(WORLD_W, Math.ceil(camera.x + canvas.width / TILE) + 1);
-  const startY = Math.max(0, Math.floor(camera.y) - 1);
-  const endY = Math.min(WORLD_H, Math.ceil(camera.y + canvas.height / TILE) + 1);
-
-  for (let y = startY; y < endY; y++) {
-    for (let x = startX; x < endX; x++) {
-      const type = world[y][x];
-      if (type === 'air') continue;
-      const block = BLOCKS[type];
-      const sx = (x - camera.x) * TILE;
-      const sy = (y - camera.y) * TILE;
-      if (type === 'water') {
-        ctx.fillStyle = 'rgba(56, 125, 181, .28)';
-        ctx.fillRect(sx, sy, TILE, TILE);
-      }
-      ctx.fillStyle = block.color;
-      ctx.fillText(block.char, sx + TILE / 2, sy + TILE / 2 + 1);
-    }
-  }
-
-  drawPlayer();
-  drawTarget();
-  drawHud();
-  statusEl.textContent = `Seed ${seed} · x ${Math.floor(player.x)} · y ${Math.floor(player.y)} · Overworld`;
+  if (tile.tree) drawTree(p.x, p.y - halfH, tile.height);
 }
 
-function drawSky() {
-  const horizon = Math.max(0, (41 - camera.y) * TILE);
-  const gradient = ctx.createLinearGradient(0, 0, 0, Math.min(canvas.height, horizon + 250));
-  gradient.addColorStop(0, '#143956');
-  gradient.addColorStop(1, '#6a99a2');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvas.width, Math.max(canvas.height, horizon));
-  ctx.fillStyle = '#f0df87';
-  ctx.font = '32px monospace';
-  ctx.fillText('☼', canvas.width - 90, 70);
+function drawTree(screenX, screenY) {
+  const trunkBase = screenY - 2;
+  ctx.font = '700 22px "Cascadia Mono", Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = BLOCKS.wood.top;
+  ctx.fillText('║', screenX, trunkBase - 4);
+  ctx.font = '700 30px "Cascadia Mono", Consolas, monospace';
+  ctx.fillStyle = BLOCKS.leaves.top;
+  ctx.fillText('♣', screenX, trunkBase - 23);
 }
 
 function drawPlayer() {
-  const x = (player.x + player.w / 2 - camera.x) * TILE;
-  const y = (player.y + player.h / 2 - camera.y) * TILE;
-  ctx.font = '700 34px "Cascadia Mono", Consolas, monospace';
-  ctx.fillStyle = '#fff3c4';
-  ctx.fillText('@', x, y);
-  ctx.font = FONT;
+  const tile = getTile(player.x, player.y);
+  if (!tile) return;
+  const p = worldToScreen(player.x, player.y, tile.height);
+  ctx.font = '900 27px "Cascadia Mono", Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = '#fff4c2';
+  ctx.strokeStyle = '#142016';
+  ctx.lineWidth = 4;
+  ctx.strokeText('@', p.x, p.y - TILE_H / 2 + 1);
+  ctx.fillText('@', p.x, p.y - TILE_H / 2 + 1);
 }
 
-function drawTarget() {
-  const sx = (mouse.tileX - camera.x) * TILE;
-  const sy = (mouse.tileY - camera.y) * TILE;
-  ctx.strokeStyle = inReach(mouse.tileX, mouse.tileY) ? '#fff5a5' : '#d85b5b';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(sx + 1, sy + 1, TILE - 2, TILE - 2);
+function drawHover() {
+  if (!hovered) return;
+  const tile = getTile(hovered.x, hovered.y);
+  if (!tile) return;
+  const p = worldToScreen(hovered.x, hovered.y, tile.height);
+  const halfW = TILE_W / 2;
+  const halfH = TILE_H / 2;
+  const points = [
+    { x: p.x, y: p.y - halfH },
+    { x: p.x + halfW, y: p.y },
+    { x: p.x, y: p.y + halfH },
+    { x: p.x - halfW, y: p.y }
+  ];
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach(point => ctx.lineTo(point.x, point.y));
+  ctx.closePath();
+  ctx.strokeStyle = distanceToPlayer(hovered.x, hovered.y) <= REACH ? '#fff6aa' : '#e06b6b';
+  ctx.lineWidth = 3;
+  ctx.stroke();
 }
 
-function drawHud() {
-  const boxW = 86;
-  const totalW = HOTBAR.length * boxW;
-  const startX = (canvas.width - totalW) / 2;
-  const y = canvas.height - 72;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = '14px "Cascadia Mono", Consolas, monospace';
-
-  HOTBAR.forEach((type, i) => {
-    ctx.fillStyle = i === selected ? 'rgba(238, 225, 147, .24)' : 'rgba(5, 12, 8, .78)';
-    ctx.fillRect(startX + i * boxW, y, boxW - 4, 54);
-    ctx.strokeStyle = i === selected ? '#efe092' : '#52645a';
-    ctx.strokeRect(startX + i * boxW, y, boxW - 4, 54);
-    ctx.fillStyle = BLOCKS[type].color;
-    ctx.font = '700 20px monospace';
-    ctx.fillText(BLOCKS[type].char, startX + i * boxW + 9, y + 23);
-    ctx.fillStyle = '#e8f1e9';
-    ctx.font = '13px monospace';
-    ctx.fillText(`${i + 1} ${type}`, startX + i * boxW + 31, y + 20);
-    ctx.fillText(`x${player.inventory[type] || 0}`, startX + i * boxW + 31, y + 40);
+function drawHotbar() {
+  const slotW = 105;
+  const totalW = HOTBAR.length * slotW;
+  const x0 = canvas.width / 2 - totalW / 2;
+  const y = canvas.height - 55;
+  HOTBAR.forEach((type, index) => {
+    const x = x0 + index * slotW;
+    ctx.fillStyle = index === selected ? '#e9dfaa' : 'rgba(8, 17, 13, 0.88)';
+    ctx.fillRect(x + 2, y, slotW - 4, 42);
+    ctx.strokeStyle = index === selected ? '#fff7c7' : '#4b6252';
+    ctx.lineWidth = index === selected ? 3 : 1;
+    ctx.strokeRect(x + 2, y, slotW - 4, 42);
+    ctx.font = '700 15px "Cascadia Mono", Consolas, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = index === selected ? '#142016' : BLOCKS[type].top;
+    ctx.fillText(`${index + 1} ${BLOCKS[type].char} ${inventory[type] ?? 0}`, x + 10, y + 21);
   });
-
-  ctx.fillStyle = 'rgba(5, 12, 8, .72)';
-  ctx.fillRect(14, 14, 235, 62);
-  ctx.fillStyle = '#e8f1e9';
-  ctx.font = '14px monospace';
-  ctx.fillText('OVERWORLD', 26, 38);
-  ctx.fillStyle = '#9eb3a1';
-  ctx.fillText(`carbón ${player.inventory.coal || 0} · hierro ${player.inventory.iron || 0}`, 26, 61);
 }
 
-function resizeCanvas() {
-  const ratio = 16 / 9;
-  const width = Math.min(1280, Math.max(640, window.innerWidth - 40));
-  canvas.width = width;
-  canvas.height = Math.round(width / ratio);
-  ctx.imageSmoothingEnabled = false;
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  gradient.addColorStop(0, '#1a3141');
+  gradient.addColorStop(0.55, '#203829');
+  gradient.addColorStop(1, '#07100b');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const visible = [];
+  for (let y = player.y - VIEW_RADIUS; y <= player.y + VIEW_RADIUS; y += 1) {
+    for (let x = player.x - VIEW_RADIUS; x <= player.x + VIEW_RADIUS; x += 1) {
+      const tile = getTile(x, y);
+      if (tile) visible.push({ x, y, tile });
+    }
+  }
+  visible.sort((a, b) => (a.x + a.y) - (b.x + b.y) || a.tile.height - b.tile.height);
+  visible.forEach(({ x, y, tile }) => drawBlock(x, y, tile));
+  drawHover();
+  drawPlayer();
+  drawHotbar();
+
+  const tile = getTile(player.x, player.y);
+  statusEl.textContent = `seed ${seed} · x ${player.x} y ${player.y} · altura ${tile?.height ?? 0} · ${HOTBAR[selected]}`;
+  requestAnimationFrame(render);
 }
 
-window.addEventListener('keydown', (event) => {
-  keys.add(event.code);
-  if (['Space', 'ArrowUp'].includes(event.code)) event.preventDefault();
-  if (event.code === 'Space' || event.code === 'KeyW' || event.code === 'ArrowUp') jump();
-  if (/^Digit[1-6]$/.test(event.code)) selected = Number(event.code.at(-1)) - 1;
-  if (event.code === 'KeyR') {
+function canMoveTo(x, y) {
+  const from = getTile(player.x, player.y);
+  const to = getTile(x, y);
+  if (!from || !to || to.top === 'water' || to.tree) return false;
+  return Math.abs(to.height - from.height) <= 1;
+}
+
+function tryMove(dx, dy) {
+  const x = player.x + dx;
+  const y = player.y + dy;
+  if (!canMoveTo(x, y)) return;
+  player.x = x;
+  player.y = y;
+  player.z = getTile(x, y).height;
+}
+
+function updateMovement(now) {
+  if (now - lastMoveAt < MOVE_REPEAT_MS) return;
+  let dx = 0;
+  let dy = 0;
+  if (keys.has('w') || keys.has('arrowup')) dy -= 1;
+  else if (keys.has('s') || keys.has('arrowdown')) dy += 1;
+  else if (keys.has('a') || keys.has('arrowleft')) dx -= 1;
+  else if (keys.has('d') || keys.has('arrowright')) dx += 1;
+  if (dx || dy) {
+    tryMove(dx, dy);
+    lastMoveAt = now;
+  }
+  requestAnimationFrame(updateMovement);
+}
+
+function distanceToPlayer(x, y) {
+  return Math.hypot(x - player.x, y - player.y);
+}
+
+function screenToTile(mouseX, mouseY) {
+  let best = null;
+  let bestScore = Infinity;
+  for (let y = player.y - VIEW_RADIUS; y <= player.y + VIEW_RADIUS; y += 1) {
+    for (let x = player.x - VIEW_RADIUS; x <= player.x + VIEW_RADIUS; x += 1) {
+      const tile = getTile(x, y);
+      if (!tile) continue;
+      const p = worldToScreen(x, y, tile.height);
+      const nx = Math.abs(mouseX - p.x) / (TILE_W / 2);
+      const ny = Math.abs(mouseY - p.y) / (TILE_H / 2);
+      const score = nx + ny;
+      if (score <= 1.15 && score < bestScore) {
+        bestScore = score;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+}
+
+function mine(tileX, tileY) {
+  if (distanceToPlayer(tileX, tileY) > REACH) return;
+  if (tileX === player.x && tileY === player.y) return;
+  const tile = getTile(tileX, tileY);
+  if (!tile) return;
+  if (tile.tree) {
+    tile.tree = false;
+    inventory.wood += 3;
+    inventory.leaves += 2;
+    return;
+  }
+  if (tile.top === 'water' || tile.height <= 0) return;
+  const drop = tile.ore || tile.top;
+  if (inventory[drop] !== undefined) inventory[drop] += 1;
+  tile.height -= 1;
+  tile.ore = null;
+  tile.top = tile.height <= 1 ? 'water' : tile.height >= 7 ? 'stone' : tile.height === 2 ? 'sand' : 'dirt';
+}
+
+function place(tileX, tileY) {
+  if (distanceToPlayer(tileX, tileY) > REACH) return;
+  const tile = getTile(tileX, tileY);
+  const type = HOTBAR[selected];
+  if (!tile || tile.tree || (inventory[type] ?? 0) <= 0) return;
+  if (tileX === player.x && tileY === player.y) return;
+  tile.height = Math.min(11, tile.height + 1);
+  tile.top = type;
+  tile.ore = null;
+  inventory[type] -= 1;
+}
+
+canvas.addEventListener('mousemove', event => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  hovered = screenToTile((event.clientX - rect.left) * scaleX, (event.clientY - rect.top) * scaleY);
+});
+
+canvas.addEventListener('mouseleave', () => { hovered = null; });
+canvas.addEventListener('contextmenu', event => event.preventDefault());
+canvas.addEventListener('mousedown', event => {
+  if (!hovered) return;
+  if (event.button === 0) mine(hovered.x, hovered.y);
+  if (event.button === 2) place(hovered.x, hovered.y);
+});
+
+window.addEventListener('keydown', event => {
+  const key = event.key.toLowerCase();
+  keys.add(key);
+  if (key >= '1' && key <= '6') selected = Number(key) - 1;
+  if (key === 'r') {
     seed = Math.floor(Math.random() * 1_000_000);
-    makeWorld();
+    generateWorld();
+  }
+  if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+    event.preventDefault();
   }
 });
-window.addEventListener('keyup', (event) => keys.delete(event.code));
-window.addEventListener('resize', resizeCanvas);
-canvas.addEventListener('contextmenu', (event) => event.preventDefault());
-canvas.addEventListener('mousemove', (event) => {
-  const rect = canvas.getBoundingClientRect();
-  mouse.x = (event.clientX - rect.left) * canvas.width / rect.width;
-  mouse.y = (event.clientY - rect.top) * canvas.height / rect.height;
-  mouse.tileX = Math.floor(mouse.x / TILE + camera.x);
-  mouse.tileY = Math.floor(mouse.y / TILE + camera.y);
-});
-canvas.addEventListener('mousedown', (event) => {
-  if (event.button === 0) mine(mouse.tileX, mouse.tileY);
-  if (event.button === 2) place(mouse.tileX, mouse.tileY);
-});
-canvas.addEventListener('wheel', (event) => {
-  selected = (selected + Math.sign(event.deltaY) + HOTBAR.length) % HOTBAR.length;
-  event.preventDefault();
-}, { passive: false });
+window.addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
 
-function loop(now) {
-  const dt = Math.min(0.033, (now - lastTime) / 1000);
-  lastTime = now;
-  update(dt);
-  render();
-  requestAnimationFrame(loop);
-}
+window.addEventListener('resize', () => {
+  const ratio = Math.min(2, window.devicePixelRatio || 1);
+  const width = Math.max(900, Math.floor(canvas.clientWidth * ratio));
+  const height = Math.floor(width * 9 / 16);
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+});
 
-resizeCanvas();
-makeWorld();
-requestAnimationFrame(loop);
+generateWorld();
+window.dispatchEvent(new Event('resize'));
+requestAnimationFrame(render);
+requestAnimationFrame(updateMovement);
