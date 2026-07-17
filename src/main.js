@@ -8,17 +8,18 @@ const TILE_H = 27;
 const HEIGHT_STEP = 15;
 const VIEW_RADIUS = 15;
 const REACH = 4.5;
-const MOVE_REPEAT_MS = 115;
+const MOVE_COOLDOWN_MS = 92;
+const MOVE_ANIMATION_MS = 115;
 
 const BLOCKS = {
-  grass:  { char: '▓', top: '#65b85e', left: '#3f7e45', right: '#4e9852', solid: true },
-  dirt:   { char: '▒', top: '#9a6a43', left: '#70472d', right: '#825637', solid: true },
-  stone:  { char: '█', top: '#8a918d', left: '#606763', right: '#747b77', solid: true },
-  sand:   { char: '░', top: '#d8c27c', left: '#a99457', right: '#baa762', solid: true },
-  water:  { char: '≈', top: '#4c8fc7', left: '#2e668f', right: '#397aa7', solid: false },
-  wood:   { char: '║', top: '#a36d38', left: '#704921', right: '#87592b', solid: true },
-  leaves: { char: '♣', top: '#3f934b', left: '#286631', right: '#347b3e', solid: true },
-  coal:   { char: '◆', top: '#343a37', left: '#202522', right: '#2a302d', solid: true }
+  grass:  { top: '#65b85e', left: '#3f7e45', right: '#4e9852', solid: true },
+  dirt:   { top: '#9a6a43', left: '#70472d', right: '#825637', solid: true },
+  stone:  { top: '#8a918d', left: '#606763', right: '#747b77', solid: true },
+  sand:   { top: '#d8c27c', left: '#a99457', right: '#baa762', solid: true },
+  water:  { top: '#4c8fc7', left: '#2e668f', right: '#397aa7', solid: false },
+  wood:   { top: '#a36d38', left: '#704921', right: '#87592b', solid: true },
+  leaves: { top: '#3f934b', left: '#286631', right: '#347b3e', solid: true },
+  coal:   { top: '#343a37', left: '#202522', right: '#2a302d', solid: true }
 };
 
 const HOTBAR = ['grass', 'dirt', 'stone', 'sand', 'wood', 'leaves'];
@@ -28,6 +29,7 @@ let world = [];
 let selected = 0;
 let hovered = null;
 let lastMoveAt = 0;
+let lastFrameAt = performance.now();
 
 const inventory = {
   grass: 20,
@@ -38,7 +40,17 @@ const inventory = {
   leaves: 20
 };
 
-const player = { x: 36, y: 36, z: 0 };
+const player = {
+  x: 36,
+  y: 36,
+  z: 0,
+  renderX: 36,
+  renderY: 36,
+  moveFromX: 36,
+  moveFromY: 36,
+  moveStartedAt: 0,
+  facing: 'south'
+};
 
 function mulberry32(value) {
   return function random() {
@@ -102,6 +114,10 @@ function generateWorld() {
   player.x = Math.floor(WORLD_SIZE / 2);
   player.y = Math.floor(WORLD_SIZE / 2);
   findSafeSpawn();
+  player.renderX = player.x;
+  player.renderY = player.y;
+  player.moveFromX = player.x;
+  player.moveFromY = player.y;
   hovered = null;
 }
 
@@ -129,8 +145,8 @@ function getTile(x, y) {
 }
 
 function worldToScreen(x, y, z = 0) {
-  const relX = x - player.x;
-  const relY = y - player.y;
+  const relX = x - player.renderX;
+  const relY = y - player.renderY;
   return {
     x: canvas.width / 2 + (relX - relY) * TILE_W / 2,
     y: canvas.height / 2 + (relX + relY) * TILE_H / 2 - z * HEIGHT_STEP
@@ -173,41 +189,48 @@ function drawBlock(x, y, tile) {
   }
   polygon(top, def.top, '#1a281e');
 
-  ctx.font = '700 18px "Cascadia Mono", Consolas, monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = tile.top === 'water' ? '#d7f0ff' : '#f1f5ef';
-  ctx.globalAlpha = tile.top === 'water' ? 0.85 : 0.72;
-  ctx.fillText(def.char, p.x, p.y + 1);
-  ctx.globalAlpha = 1;
+  if (tile.ore === 'coal') {
+    ctx.fillStyle = '#1d2320';
+    ctx.beginPath();
+    ctx.arc(p.x - 7, p.y - 2, 3, 0, Math.PI * 2);
+    ctx.arc(p.x + 6, p.y + 3, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
-  if (tile.tree) drawTree(p.x, p.y - halfH, tile.height);
+  if (tile.tree) drawTree(p.x, p.y - halfH);
 }
 
 function drawTree(screenX, screenY) {
-  const trunkBase = screenY - 2;
-  ctx.font = '700 22px "Cascadia Mono", Consolas, monospace';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
+  const trunkHeight = 24;
+  const trunkWidth = 8;
+  ctx.fillStyle = BLOCKS.wood.left;
+  ctx.fillRect(screenX - trunkWidth / 2, screenY - trunkHeight, trunkWidth, trunkHeight);
   ctx.fillStyle = BLOCKS.wood.top;
-  ctx.fillText('║', screenX, trunkBase - 4);
-  ctx.font = '700 30px "Cascadia Mono", Consolas, monospace';
+  ctx.fillRect(screenX - trunkWidth / 2 + 2, screenY - trunkHeight, trunkWidth - 3, trunkHeight);
+
+  ctx.fillStyle = BLOCKS.leaves.left;
+  ctx.beginPath();
+  ctx.arc(screenX, screenY - trunkHeight - 8, 18, 0, Math.PI * 2);
+  ctx.fill();
   ctx.fillStyle = BLOCKS.leaves.top;
-  ctx.fillText('♣', screenX, trunkBase - 23);
+  ctx.beginPath();
+  ctx.arc(screenX - 4, screenY - trunkHeight - 13, 14, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function drawPlayer() {
   const tile = getTile(player.x, player.y);
   if (!tile) return;
-  const p = worldToScreen(player.x, player.y, tile.height);
-  ctx.font = '900 27px "Cascadia Mono", Consolas, monospace';
+  const p = worldToScreen(player.renderX, player.renderY, tile.height);
+  const bob = Math.sin(performance.now() * 0.018) * (keys.size ? 1.5 : 0.4);
+  ctx.font = '900 28px "Cascadia Mono", Consolas, monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
   ctx.fillStyle = '#fff4c2';
   ctx.strokeStyle = '#142016';
   ctx.lineWidth = 4;
-  ctx.strokeText('@', p.x, p.y - TILE_H / 2 + 1);
-  ctx.fillText('@', p.x, p.y - TILE_H / 2 + 1);
+  ctx.strokeText('@', p.x, p.y - TILE_H / 2 + 1 + bob);
+  ctx.fillText('@', p.x, p.y - TILE_H / 2 + 1 + bob);
 }
 
 function drawHover() {
@@ -232,6 +255,18 @@ function drawHover() {
   ctx.stroke();
 }
 
+function drawHotbarBlock(type, x, y, size) {
+  const def = BLOCKS[type];
+  const halfW = size / 2;
+  const halfH = size / 4;
+  polygon([
+    { x, y: y - halfH },
+    { x: x + halfW, y },
+    { x, y: y + halfH },
+    { x: x - halfW, y }
+  ], def.top, '#17221b');
+}
+
 function drawHotbar() {
   const slotW = 105;
   const totalW = HOTBAR.length * slotW;
@@ -244,15 +279,29 @@ function drawHotbar() {
     ctx.strokeStyle = index === selected ? '#fff7c7' : '#4b6252';
     ctx.lineWidth = index === selected ? 3 : 1;
     ctx.strokeRect(x + 2, y, slotW - 4, 42);
-    ctx.font = '700 15px "Cascadia Mono", Consolas, monospace';
+    drawHotbarBlock(type, x + 22, y + 21, 24);
+    ctx.font = '700 14px "Cascadia Mono", Consolas, monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = index === selected ? '#142016' : BLOCKS[type].top;
-    ctx.fillText(`${index + 1} ${BLOCKS[type].char} ${inventory[type] ?? 0}`, x + 10, y + 21);
+    ctx.fillStyle = index === selected ? '#142016' : '#dbe8dd';
+    ctx.fillText(`${index + 1}  ${inventory[type] ?? 0}`, x + 42, y + 21);
   });
 }
 
-function render() {
+function updatePlayerInterpolation(now) {
+  const elapsed = now - player.moveStartedAt;
+  const t = Math.max(0, Math.min(1, elapsed / MOVE_ANIMATION_MS));
+  const eased = 1 - Math.pow(1 - t, 3);
+  player.renderX = player.moveFromX + (player.x - player.moveFromX) * eased;
+  player.renderY = player.moveFromY + (player.y - player.moveFromY) * eased;
+}
+
+function render(now) {
+  const delta = Math.min(50, now - lastFrameAt);
+  lastFrameAt = now;
+  void delta;
+  updatePlayerInterpolation(now);
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
   gradient.addColorStop(0, '#1a3141');
@@ -262,8 +311,8 @@ function render() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const visible = [];
-  for (let y = player.y - VIEW_RADIUS; y <= player.y + VIEW_RADIUS; y += 1) {
-    for (let x = player.x - VIEW_RADIUS; x <= player.x + VIEW_RADIUS; x += 1) {
+  for (let y = Math.floor(player.renderY) - VIEW_RADIUS; y <= Math.ceil(player.renderY) + VIEW_RADIUS; y += 1) {
+    for (let x = Math.floor(player.renderX) - VIEW_RADIUS; x <= Math.ceil(player.renderX) + VIEW_RADIUS; x += 1) {
       const tile = getTile(x, y);
       if (tile) visible.push({ x, y, tile });
     }
@@ -286,26 +335,52 @@ function canMoveTo(x, y) {
   return Math.abs(to.height - from.height) <= 1;
 }
 
-function tryMove(dx, dy) {
+function tryMove(dx, dy, now) {
   const x = player.x + dx;
   const y = player.y + dy;
-  if (!canMoveTo(x, y)) return;
+  if (!canMoveTo(x, y)) return false;
+
+  if (dx !== 0 && dy !== 0) {
+    const sideA = canMoveTo(player.x + dx, player.y);
+    const sideB = canMoveTo(player.x, player.y + dy);
+    if (!sideA && !sideB) return false;
+  }
+
+  player.moveFromX = player.renderX;
+  player.moveFromY = player.renderY;
+  player.moveStartedAt = now;
   player.x = x;
   player.y = y;
   player.z = getTile(x, y).height;
+  return true;
+}
+
+function getScreenRelativeMove() {
+  const up = keys.has('w') || keys.has('arrowup');
+  const down = keys.has('s') || keys.has('arrowdown');
+  const left = keys.has('a') || keys.has('arrowleft');
+  const right = keys.has('d') || keys.has('arrowright');
+
+  let screenX = Number(right) - Number(left);
+  let screenY = Number(down) - Number(up);
+  if (!screenX && !screenY) return null;
+
+  const dx = Math.sign(screenX + screenY);
+  const dy = Math.sign(screenY - screenX);
+
+  if (screenY < 0) player.facing = 'north';
+  else if (screenY > 0) player.facing = 'south';
+  else if (screenX < 0) player.facing = 'west';
+  else if (screenX > 0) player.facing = 'east';
+
+  return { dx, dy };
 }
 
 function updateMovement(now) {
-  if (now - lastMoveAt < MOVE_REPEAT_MS) return;
-  let dx = 0;
-  let dy = 0;
-  if (keys.has('w') || keys.has('arrowup')) dy -= 1;
-  else if (keys.has('s') || keys.has('arrowdown')) dy += 1;
-  else if (keys.has('a') || keys.has('arrowleft')) dx -= 1;
-  else if (keys.has('d') || keys.has('arrowright')) dx += 1;
-  if (dx || dy) {
-    tryMove(dx, dy);
-    lastMoveAt = now;
+  const move = getScreenRelativeMove();
+  if (move && now - lastMoveAt >= MOVE_COOLDOWN_MS) {
+    if (tryMove(move.dx, move.dy, now)) lastMoveAt = now;
+    else lastMoveAt = now - MOVE_COOLDOWN_MS * 0.45;
   }
   requestAnimationFrame(updateMovement);
 }
@@ -317,8 +392,8 @@ function distanceToPlayer(x, y) {
 function screenToTile(mouseX, mouseY) {
   let best = null;
   let bestScore = Infinity;
-  for (let y = player.y - VIEW_RADIUS; y <= player.y + VIEW_RADIUS; y += 1) {
-    for (let x = player.x - VIEW_RADIUS; x <= player.x + VIEW_RADIUS; x += 1) {
+  for (let y = Math.floor(player.renderY) - VIEW_RADIUS; y <= Math.ceil(player.renderY) + VIEW_RADIUS; y += 1) {
+    for (let x = Math.floor(player.renderX) - VIEW_RADIUS; x <= Math.ceil(player.renderX) + VIEW_RADIUS; x += 1) {
       const tile = getTile(x, y);
       if (!tile) continue;
       const p = worldToScreen(x, y, tile.height);
@@ -393,6 +468,7 @@ window.addEventListener('keydown', event => {
   }
 });
 window.addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
+window.addEventListener('blur', () => keys.clear());
 
 window.addEventListener('resize', () => {
   const ratio = Math.min(2, window.devicePixelRatio || 1);
